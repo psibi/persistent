@@ -19,12 +19,14 @@ module Database.Persist.Postgresql
     , openSimpleConn
     , tableName
     , fieldName
+, playMigration
     ) where
 
 import Database.Persist.Sql
 import Database.Persist.Sql.Util (dbIdColumnsEsc)
 import Data.Fixed (Pico)
-
+import Control.Monad.Trans.Reader (runReaderT)
+import           Control.Monad.Logger    (runStderrLoggingT)
 import qualified Database.PostgreSQL.Simple as PG
 import qualified Database.PostgreSQL.Simple.TypeInfo as PG
 import qualified Database.PostgreSQL.Simple.TypeInfo.Static as PS
@@ -33,7 +35,7 @@ import qualified Database.PostgreSQL.Simple.ToField as PGTF
 import qualified Database.PostgreSQL.Simple.FromField as PGFF
 import qualified Database.PostgreSQL.Simple.Types as PG
 import Database.PostgreSQL.Simple.Ok (Ok (..))
-
+import Control.Monad.Trans.Writer (runWriterT)
 import qualified Database.PostgreSQL.LibPQ as LibPQ
 
 import Control.Monad.Trans.Resource
@@ -60,6 +62,7 @@ import qualified Data.Text.Encoding as T
 import qualified Blaze.ByteString.Builder.Char8 as BBB
 
 import Data.Text (Text)
+import qualified Data.Text.IO as TIO
 import Data.Aeson
 import Data.Aeson.Types (modifyFailure)
 import Control.Monad (forM)
@@ -400,19 +403,13 @@ doesTableExist getter (DBName name) = do
     start' res = error $ "doesTableExist returned unexpected result: " ++ show res
     finish x = await >>= maybe (return x) (error "Too many rows returned in doesTableExist")
 
-migrate' :: [EntityDef]
+nmigrate' :: [EntityDef]
          -> (Text -> IO Statement)
          -> EntityDef
          -> IO (Either [Text] [(Bool, Text)])
-migrate' allDefs getter entity = fmap (fmap $ map showAlterDb) $ do
-    old <- getColumns getter entity
-    case partitionEithers old of
-        ([], old'') -> do
-            exists <-
-                if null old
-                    then doesTableExist getter name
-                    else return True
-            return $ Right $ migrationText exists old''
+nmigrate' allDefs getter entity = fmap (fmap $ map showAlterDb) $ do
+    case partitionEithers [] of
+        ([], old'') -> return $ Right $ migrationText False old''
         (errs, _) -> return $ Left errs
   where
     name = entityDB entity
@@ -969,3 +966,114 @@ refName (DBName table) (DBName column) =
 
 udToPair :: UniqueDef -> (DBName, [DBName])
 udToPair ud = (uniqueDBName ud, map snd $ uniqueFields ud)
+
+migrate' :: [EntityDef]
+         -> (Text -> IO Statement)
+         -> EntityDef
+         -> IO (Either [Text] [(Bool, Text)])
+migrate' allDefs getter entity = fmap (fmap $ map showAlterDb) $ do
+    old <- getColumns getter entity
+    case partitionEithers old of
+        ([], old'') -> do
+            exists <-
+                if null old
+                    then doesTableExist getter name
+                    else return True
+            return $ Right $ migrationText exists old''
+        (errs, _) -> return $ Left errs
+  where
+    name = entityDB entity
+    migrationText exists old'' =
+        if not exists
+            then createText newcols fdefs udspair
+            else let (acs, ats) = getAlters allDefs entity (newcols, udspair) old'
+                     acs' = map (AlterColumn name) acs
+                     ats' = map (AlterTable name) ats
+                 in  acs' ++ ats'
+       where
+         old' = partitionEithers old''
+         (newcols', udefs, fdefs) = mkColumns allDefs entity
+         newcols = filter (not . safeToRemove entity . cName) newcols'
+         udspair = map udToPair udefs
+            -- Check for table existence if there are no columns, workaround
+            -- for https://github.com/yesodweb/persistent/issues/152
+
+    createText newcols fdefs udspair =
+        addTable : uniques ++ references ++ foreignsAlt
+      where
+        addTable = AddTable $ T.concat
+                -- Lower case e: see Database.Persist.Sql.Migration
+                [ "CREATe TABLE " -- DO NOT FIX THE CAPITALIZATION!
+                , escape name
+                , "("
+                , idtxt
+                , if null newcols then "" else ","
+                , T.intercalate "," $ map showColumn newcols
+                , ")"
+                ]
+        uniques = flip concatMap udspair $ \(uname, ucols) ->
+                [AlterTable name $ AddUniqueConstraint uname ucols]
+        references = mapMaybe (\c@Column { cName=cname, cReference=Just (refTblName, _) } ->
+            getAddReference allDefs name refTblName cname (cReference c))
+                   $ filter (isJust . cReference) newcols
+        foreignsAlt = flip map fdefs (\fdef ->
+            let (childfields, parentfields) = unzip (map (\((_,b),(_,d)) -> (b,d)) (foreignFields fdef))
+            in AlterColumn name (foreignRefTableDBName fdef, AddReference (foreignConstraintNameDBName fdef) childfields (map escape parentfields)))
+
+    idtxt = case entityPrimary entity of
+                Just pdef -> T.concat [" PRIMARY KEY (", T.intercalate "," $ map (escape . fieldDB) $ compositeFields pdef, ")"]
+                Nothing   ->
+                    let defText = defaultAttribute $ fieldAttrs $ entityId entity
+                        sType = fieldSqlType $ entityId entity
+                    in  T.concat
+                            [ escape $ fieldDB (entityId entity)
+                            , maySerial sType defText
+                            , " PRIMARY KEY UNIQUE"
+                            , mayDefault defText
+                            ]
+
+playMigration :: Migration -> IO ()
+playMigration mig = do
+  smap <- newIORef $ Map.empty
+  let sqlbend = SqlBackend { connPrepare = \sql -> do
+                                             putStrLn $ "DEBUG connPrepare on: " ++ show sql
+                                             return Statement
+                                                        { stmtFinalize = return ()
+                                                        , stmtReset = return ()
+                                                        , stmtExecute = error "stmtExecute"
+                                                        , stmtQuery = \x -> return $ return ()
+                                                        },
+                             connInsertManySql = Nothing,
+                             connInsertSql = error "conn insert sql",
+                             connStmtMap = smap,
+                             connClose = error "connClose",
+                             connMigrateSql = nmigrate',
+                             connBegin = error "connBegin",
+                             connCommit = error "connCommit",
+                             connRollback = error "connRollback",
+                             connEscapeName = escape,
+                             connNoLimit = error "connNoLimit",
+                             connRDBMS = error "connRDBMD",
+                             connLimitOffset = error "connLimitoffset",
+                             connLogFunc = error "connLogFunc"} :: SqlBackend
+  r <- res sqlbend
+  let r' = snd r
+      -- r' = snd . fst $ r
+  print "jack"
+  mapM_ TIO.putStrLn $ map snd r'
+  -- mapM_ TIO.putStrLn r'
+  return ()
+    where res= runReaderT $ runWriterT $ runWriterT mig 
+          --res= runWriterT mig 
+
+
+-- type Migration = WriterT [Text] (WriterT CautiousMigration (ReaderT SqlBackend IO)) ()
+-- λ> :t runWriterT
+-- runWriterT :: WriterT w m a -> m (a, w)
+
+-- WriterT CautiousMigration (ReaderT SqlBackend IO) ((), [Text])
+-- (ReaderT SqlBackend IO) (((), [Text]), CautiousMigration)
+
+-- runReaderT :: ReaderT r m a -> r -> m a
+
+-- a :: ((), Text)
