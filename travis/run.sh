@@ -38,11 +38,11 @@ else
     fi
 
     cd persistent-test
-    cabal install --force-reinstalls --only-dependencies --ghc-options='-j1' --enable-tests -f$BACKEND
+    cabal install --force-reinstalls --only-dependencies --ghc-options='-j2' --enable-tests -f$BACKEND
 
     # Make sure we get regular output sent to Travis to avoid it canceling our
     # builds
     cabal configure --enable-tests -f$BACKEND
-    cabal build -j1
-    cabal test -j1
+    cabal build -j2
+    cabal test -j2
 fi
