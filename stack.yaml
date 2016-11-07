@@ -8,6 +8,7 @@ packages:
   - ./persistent-mysql
   - ./persistent-postgresql
   - ./persistent-redis
+  - ./sibi-persistent
   # - ./persistent-zookeeper
 
 extra-deps:

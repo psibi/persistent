@@ -622,27 +622,25 @@ instance PersistUniqueWrite DB.MongoContext where
         uniq <- onlyUnique newRecord
         upsertBy uniq newRecord upds
 
--- -        let uniqKeys = map DB.label uniqueDoc
--- -        let insDoc = DB.exclude uniqKeys $ toInsertDoc newRecord
---          let selection = DB.select uniqueDoc $ collectionName newRecord
--- -        if null upds
--- -          then DB.upsert selection ["$set" DB.=: insDoc]
--- -          else do
--- -            DB.upsert selection ["$setOnInsert" DB.=: insDoc]
--- -            DB.modify selection $ updatesToDoc upds
--- -        -- because findAndModify $setOnInsert is broken we do a separate get now
-
     upsertBy uniq newRecord upds = do
-        let uniqueDoc = toUniquesDoc uniq
-        let uniqKeys = map DB.label uniqueDoc
-        let insDoc = DB.exclude uniqKeys $ toInsertDoc newRecord
-        let selection = DB.select uniqueDoc $ collectionName newRecord
+        let uniqueDoc = toUniquesDoc uniq :: [DB.Field]
+        let uniqKeys = map DB.label uniqueDoc :: [DB.Label]   
+        let insDoc = DB.exclude uniqKeys $ toInsertDoc newRecord :: DB.Document
+        let selection = DB.select uniqueDoc $ collectionName newRecord :: DB.Selection
+        -- case (DB.selector selection) of
+        --   [] -> DB.upsert selection ["$setOnInsert" DB.=: insDoc]
+        --   xs -> if null upds
+        --         then return ()
+        --         else DB.modify selection $ updatesToDoc upds
+        -- DB.upsert selection $ toInsertDoc newRecord
         mdoc <- getBy uniq
         case mdoc of
-          Nothing -> DB.upsert selection ["$set" DB.=: insDoc]
+          Nothing -> if null upds
+                     then return ()
+                     else DB.upsert selection ["$setOnInsert" DB.=: insDoc]
           Just _ -> if null upds
                     then return ()
-                    else DB.modify selection $ updatesToDoc upds
+                    else DB.modify selection $ DB.exclude uniqKeys $ updatesToDoc upds
         newMdoc <- getBy uniq
         case newMdoc of
           Nothing -> err "possible race condition: getBy found Nothing"
@@ -1513,3 +1511,4 @@ infix 4 `inList`
 ninList :: PersistField typ => EntityField v [typ] -> [typ] -> Filter v
 f `ninList` a = Filter (unsafeCoerce f) (Right a) In
 infix 4 `ninList`
+

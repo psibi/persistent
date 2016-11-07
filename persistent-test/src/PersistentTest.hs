@@ -27,7 +27,9 @@ import Database.Persist
 #ifdef WITH_NOSQL
 #ifdef WITH_MONGODB
 import qualified Database.MongoDB as MongoDB
+import Database.MongoDB.Admin (Index(..))
 import Database.Persist.MongoDB (toInsertDoc, docToEntityThrow, collectionName, recordToDocument)
+import Database.MongoDB.Query (liftDB)
 #endif
 
 #else
@@ -495,6 +497,8 @@ specs = describe "persistent" $ do
       pBlue30 <- updateGet key25 [PersonAge +=. 2]
       pBlue30 @== Person "Updated" 30 Nothing
 
+  -- The test failure occurs because the uniqueness constraint is not
+  -- maintained in the insert query.
   describe "upsert" $ do
     it "adds a new row with no updates" $ db $ do
         Entity _ u <- upsert (Upsert "a" "new" "") [UpsertAttr =. "update"]
@@ -502,13 +506,13 @@ specs = describe "persistent" $ do
         c @== 1
         upsertAttr u @== "new"
     it "keeps the existing row" $ db $ do
-        initial <- insertEntity (Upsert "a" "initial" "")
-        update' <- upsert (Upsert "a" "update" "") []
+        initial <- insertEntity (Upsert "foo" "initial" "")
+        update' <- upsert (Upsert "foo" "update" "") []
         update' @== initial
     it "updates an existing row" $ db $ do
-        initial <- insertEntity (Upsert "a" "initial" "extra")
+        initial <- insertEntity (Upsert "cow" "initial" "extra")
         update' <-
-            upsert (Upsert "a" "wow" "such unused") [UpsertAttr =. "update"]
+            upsert (Upsert "cow" "wow" "such unused") [UpsertAttr =. "update"]
         ((==@) `on` entityKey) initial update'
         upsertAttr (entityVal update') @== "update"
         upsertExtra (entityVal update') @== "extra"
@@ -526,19 +530,19 @@ specs = describe "persistent" $ do
         c @== 1
         upsertByAttr u @== "new"
     it "keeps the existing row" $ db $ do
-        initial <- insertEntity (UpsertBy "a" "Boston" "initial")
-        update' <- upsertBy uniqueEmail (UpsertBy "a" "Boston" "update") []
+        initial <- insertEntity (UpsertBy "foo" "Chennai" "initial")
+        update' <- upsertBy (UniqueUpsertBy "foo") (UpsertBy "foo" "Chennai" "update") []
         update' @== initial
     it "updates an existing row" $ db $ do
-        initial <- insertEntity (UpsertBy "a" "Boston" "initial")
+        initial <- insertEntity (UpsertBy "ko" "Kumbakonam" "initial")
         update' <-
             upsertBy
-                uniqueEmail
-                (UpsertBy "a" "wow" "such unused")
+                (UniqueUpsertBy "ko")
+                (UpsertBy "ko" "Bangalore" "such unused")
                 [UpsertByAttr =. "update"]
         ((==@) `on` entityKey) initial update'
         upsertByAttr (entityVal update') @== "update"
-        upsertByCity (entityVal update') @== "Boston"
+        upsertByCity (entityVal update') @== "Kumbakonam"
     it "updates by the appropriate constraint" $ db $ do
         initBoston <- insertEntity (UpsertBy "bos" "Boston" "bos init")
         initKrum <- insertEntity (UpsertBy "krum" "Krum" "krum init")
