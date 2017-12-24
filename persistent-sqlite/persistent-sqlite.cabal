@@ -78,6 +78,24 @@ test-suite test
                 , time
                 , transformers
 
+benchmark bench
+  type: exitcode-stdio-1.0
+  main-is: Main.hs
+  hs-source-dirs: bench
+  ghc-options:  -O2 -Wall
+  build-depends:  gauge
+                , persistent-template
+                , persistent-sqlite
+                , persistent
+                , base
+                , time
+                , transformers
+                , text
+                , monad-logger
+                , resourcet
+  other-modules:  Schema
+                , Benchmark
+
 executable sanity
     if flag(build-sanity-exe)
         buildable: True
